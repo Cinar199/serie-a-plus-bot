@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
@@ -8,19 +9,19 @@ const PORT = process.env.PORT || 3000;
 const CONTROL_SECRET = process.env.CONTROL_SECRET;
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "openrouter/auto";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/auto";
 
-let match = null;
+const matches = new Map();
 
-const sleep = (ms) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function authorized(req, res, next) {
   const auth = req.get("Authorization") || "";
+
   if (!CONTROL_SECRET || auth !== `Bearer ${CONTROL_SECRET}`) {
     return res.status(401).json({ error: "Yetkisiz istek." });
   }
+
   next();
 }
 
@@ -30,18 +31,21 @@ async function sendDiscord(content) {
     return;
   }
 
-  const response = await fetch(WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      content: String(content).slice(0, 1900),
-      allowed_mentions: { parse: [] }
-    })
-  });
+  try {
+    const response = await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: String(content).slice(0, 1900),
+        allowed_mentions: { parse: [] }
+      })
+    });
 
-  if (!response.ok) {
-    const details = await response.text();
-    console.error("Discord webhook hatası:", response.status, details);
+    if (!response.ok) {
+      console.error("Discord webhook hatası:", response.status);
+    }
+  } catch (error) {
+    console.error("Discord bağlantı hatası:", error.message);
   }
 }
 
@@ -63,7 +67,9 @@ async function aiCommentary(instruction, fallback) {
             {
               role: "system",
               content:
-                "Sen Serie A+ futbol maç anlatıcısısın. Türkçe, doğal, heyecanlı ve kısa anlat. Verilen takım, oyuncu, dakika ve skoru değiştirme. Olmayan oyuncu veya olay uydurma. En fazla iki cümle yaz."
+                "Sen Serie A+ futbol spikerisin. Türkçe, doğal ve heyecanlı anlat. " +
+                "Verilen takım, oyuncu, dakika ve skoru değiştirme. " +
+                "Yeni oyuncu veya olay uydurma. En fazla iki cümle yaz."
             },
             { role: "user", content: instruction }
           ],
@@ -74,22 +80,29 @@ async function aiCommentary(instruction, fallback) {
     );
 
     const data = await response.json();
-    const result = data.choices?.[0]?.message?.content?.trim();
-    return result || fallback;
+    return data.choices?.[0]?.message?.content?.trim() || fallback;
   } catch (error) {
     console.error("OpenRouter hatası:", error.message);
     return fallback;
   }
 }
 
-function teamFor(side) {
-  if (!match) return null;
-  if (["ev", "home"].includes(String(side).toLowerCase())) {
-    return match.homeTeam;
+function getMatch(matchId) {
+  if (typeof matchId !== "string" || !matchId.trim()) return null;
+  return matches.get(matchId.trim().toUpperCase()) || null;
+}
+
+function teamFor(game, side) {
+  if (!game) return null;
+
+  const value = String(side || "").toLowerCase();
+
+  if (["ev", "home"].includes(value)) return game.homeTeam;
+
+  if (["dep", "deplasman", "away"].includes(value)) {
+    return game.awayTeam;
   }
-  if (["dep", "deplasman", "away"].includes(String(side).toLowerCase())) {
-    return match.awayTeam;
-  }
+
   return null;
 }
 
@@ -101,167 +114,271 @@ function randomItem(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-function scoreText() {
-  return `${match.homeTeam.emoji} ${match.homeTeam.name} ${match.homeScore} - ${match.awayScore} ${match.awayTeam.name} ${match.awayTeam.emoji}`;
+function scoreText(game) {
+  return (
+    `${game.homeTeam.emoji} **${game.homeTeam.name} ${game.homeScore} - ` +
+    `${game.awayScore} ${game.awayTeam.name}** ${game.awayTeam.emoji}`
+  );
 }
 
-function matchIsCurrent(current) {
-  return match === current && current.running;
+function matchTag(game) {
+  return `🆔 \`${game.id}\``;
 }
 
-async function announceEvent(current, instruction, fallback) {
-  if (!matchIsCurrent(current)) return;
+function isRunning(game) {
+  return matches.get(game.id) === game && game.running;
+}
+
+// Bütün maç olaylarının ortak mesaj biçimi.
+async function sendMatchEvent(game, team, description) {
+  if (!isRunning(game)) return;
+
+  const message =
+    `### 📢 BİLGİ | ${game.minute}'\n\n` +
+    `${scoreText(game)}\n\n` +
+    `> ${team.emoji} <:futbolcu:1504904247551201441> ` +
+    `**${game.minute}'** | ${description}\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`;
+
+  await sendDiscord(`${matchTag(game)}\n${message}`);
+}
+
+async function announceEvent(game, team, instruction, fallback) {
+  if (!isRunning(game)) return;
+
   const commentary = await aiCommentary(instruction, fallback);
-  if (matchIsCurrent(current)) await sendDiscord(commentary);
+
+  if (isRunning(game)) {
+    await sendMatchEvent(game, team, commentary);
+  }
 }
 
-async function automaticEvent(current) {
-  const home = current.homeTeam;
-  const away = current.awayTeam;
+// Rastgele maç olayı: gol, korner, atak, kart, kurtarış veya savunma.
+async function automaticEvent(game) {
+  const home = game.homeTeam;
+  const away = game.awayTeam;
+
   const homePlayers = activePlayers(home);
   const awayPlayers = activePlayers(away);
 
-  if (!homePlayers.length || !awayPlayers.length) {
-    await announceEvent(
-      current,
-      `${current.minute}. dakika. ${scoreText()}. Kısa maç anlatımı yaz.`,
-      `⏱️ ${current.minute}. dakika | ${scoreText()}`
-    );
-    return;
-  }
+  if (!homePlayers.length || !awayPlayers.length) return;
 
   const attackingHome = Math.random() < 0.5;
   const team = attackingHome ? home : away;
   const opponent = attackingHome ? away : home;
   const attackers = attackingHome ? homePlayers : awayPlayers;
+  const player = randomItem(attackers);
+  const event = Math.random();
 
-  // Gol olasılığı
-  if (Math.random() < 0.14) {
-    const scorer = randomItem(attackers);
-    if (attackingHome) current.homeScore++;
-    else current.awayScore++;
+  // GOL
+  if (event < 0.14) {
+    if (attackingHome) game.homeScore++;
+    else game.awayScore++;
 
     const fallback =
-      `⚽ GOOOOOL! ${team.emoji} ${team.name} adına ${scorer.name} ` +
-      `topu ağlara gönderiyor! Skor: ${scoreText()}`;
+      `⚽ **GOOOOL!** ${player.name} golü attı!`;
 
     const commentary = await aiCommentary(
-      `${current.minute}. dakika. GOL! Golü atan oyuncu ${scorer.name}. ` +
-      `Gol atan takım ${team.name}. Güncel skor: ${scoreText()}. ` +
-      `Bu bilgileri koruyarak Türkçe, heyecanlı bir gol anlatımı yaz.`,
+      `${game.minute}. dakika. Golü atan oyuncu: ${player.name}. ` +
+      `Takım: ${team.name}. Güncel skor: ${home.name} ${game.homeScore} - ` +
+      `${game.awayScore} ${away.name}. Heyecanlı Türkçe gol anlatımı yaz. ` +
+      `Oyuncu adını ve skoru değiştirme.`,
       fallback
     );
 
-    if (matchIsCurrent(current)) {
-      // Oyuncu adı ve skor her durumda kesin olarak gösterilir.
-      await sendDiscord(
-        `⚽ **GOOOOL! ${team.emoji} ${team.name}**\n` +
-        `${commentary}\n🥅 Golü atan: **${scorer.name}**\n📊 **${scoreText()}**`
-      );
-      await sleep(20000);
-    }
+    await sendMatchEvent(
+      game,
+      team,
+      `⚽ **GOOOOL!** ${commentary} | Golü atan: **${player.name}**`
+    );
+
+    await sleep(20000);
     return;
   }
 
-  // Otomatik sarı kart olayı
-  if (Math.random() < 0.10) {
-    const player = randomItem(attackers);
+  // KORNER
+  if (event < 0.34) {
+    await announceEvent(
+      game,
+      team,
+      `${game.minute}. dakika. ${player.name}, ${team.name} oyuncusu. ` +
+      `Korner kullanılıyor, savunma topu uzaklaştırıyor.`,
+      `**${player.name}** korneri kullandı, savunma topu uzaklaştırdı.`
+    );
+    return;
+  }
+
+  // ATAK
+  if (event < 0.65) {
+    await announceEvent(
+      game,
+      team,
+      `${game.minute}. dakika. ${player.name} topu ileri taşıyor. ` +
+      `${opponent.name} savunması baskı yapıyor.`,
+      `**${player.name}** topu ileri taşıyor, ${opponent.name} savunması baskı yapıyor.`
+    );
+    return;
+  }
+
+  // SARI KART VE İKİNCİ SARI
+  if (event < 0.75) {
     player.yellow++;
 
     if (player.yellow >= 2) {
       player.active = false;
       player.red = true;
 
-      await announceEvent(
-        current,
-        `${current.minute}. dakika. ${player.name}, ${team.name} oyuncusu. ` +
-        `İkinci sarıdan kırmızı kart gördü. Skor ${scoreText()}.`,
-        `🟥 ${current.minute}'. ${player.name}, ikinci sarı kartın ardından kırmızı kart gördü! ${scoreText()}`
+      await sendMatchEvent(
+        game,
+        team,
+        `🟥 **${player.name}** ikinci sarı karttan kırmızı kart gördü!`
       );
     } else {
-      await announceEvent(
-        current,
-        `${current.minute}. dakika. ${player.name}, ${team.name} oyuncusu, sarı kart gördü. Skor ${scoreText()}.`,
-        `🟨 ${current.minute}'. ${player.name} sarı kart gördü. ${scoreText()}`
+      await sendMatchEvent(
+        game,
+        team,
+        `🟨 **${player.name}** sarı kart gördü.`
       );
     }
+
     return;
   }
 
-  await announceEvent(
-    current,
-    `${current.minute}. dakika. ${team.name} hücum yapıyor, ${opponent.name} savunmada. ` +
-    `Skor ${scoreText()}. Kısa Türkçe futbol anlatımı yaz.`,
-    `⚽ ${current.minute}'. ${team.name} rakip kalede etkili olmaya çalışıyor. ${scoreText()}`
+  // KALECİ KURTARIŞI
+  if (event < 0.88) {
+    await announceEvent(
+      game,
+      team,
+      `${game.minute}. dakika. ${player.name} kaleyi yokluyor.`,
+      `**${player.name}** şutunu çekti, kaleci topu kurtardı!`
+    );
+    return;
+  }
+
+  // SAVUNMA
+  const defender = randomItem(activePlayers(opponent));
+
+  await sendMatchEvent(
+    game,
+    opponent,
+    `**${defender.name}** rakip atağını karşıladı ve topu uzaklaştırdı.`
   );
 }
 
-async function runMatch(current) {
-  if (!matchIsCurrent(current)) return;
+async function runMatch(game) {
+  if (!isRunning(game)) return;
 
   await sendDiscord(
-    `📋 **KADROLAR TAMAM! MAÇ BAŞLIYOR**\n${scoreText()}\n` +
-    `🏟️ İlk düdük çaldı!`
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | MAÇ BAŞLADI\n\n${scoreText(game)}\n\n` +
+    `> 🏟️ İlk düdük çaldı!\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
   );
 
-  while (matchIsCurrent(current) && current.minute < 90) {
+  while (isRunning(game) && game.minute < 90) {
     await sleep(5000);
-    if (!matchIsCurrent(current)) return;
+    if (!isRunning(game)) return;
 
-    current.minute++;
+    game.minute++;
 
-    if (current.minute === 45) {
+    // Devre arası
+    if (game.minute === 45) {
       await sendDiscord(
-        `⏸️ **DEVRE ARASI**\n${scoreText()}\n` +
-        `İlk 45 dakika tamamlandı. İkinci yarı 60 saniye sonra başlayacak.`
+        `${matchTag(game)}\n` +
+        `### 📢 BİLGİ | DEVRE ARASI\n\n${scoreText(game)}\n\n` +
+        `> ⏸️ İlk 45 dakika tamamlandı. İkinci yarı 60 saniye sonra başlayacak.\n` +
+        `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
       );
 
       await sleep(60000);
-      if (!matchIsCurrent(current)) return;
+      if (!isRunning(game)) return;
 
-      await sendDiscord(`▶️ **İKİNCİ YARI BAŞLADI!**\n${scoreText()}`);
+      await sendDiscord(
+        `${matchTag(game)}\n` +
+        `### 📢 BİLGİ | İKİNCİ YARI\n\n${scoreText(game)}\n\n` +
+        `> ▶️ İkinci yarı başladı!\n` +
+        `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
+      );
+
       continue;
     }
 
-    if (current.minute % 2 === 0 || current.minute === 90) {
-      await automaticEvent(current);
+    if (game.minute % 2 === 0) {
+      await automaticEvent(game);
     }
   }
 
-  if (!matchIsCurrent(current)) return;
+  if (!isRunning(game)) return;
 
-  current.running = false;
-  current.finished = true;
+  game.running = false;
+  game.finished = true;
+
+  const fallback =
+    `🏁 Karşılaşma sona erdi. Son skor: ${game.homeTeam.name} ` +
+    `${game.homeScore} - ${game.awayScore} ${game.awayTeam.name}.`;
 
   const report = await aiCommentary(
-    `Maç sona erdi. Ev sahibi ${current.homeTeam.name}, deplasman ${current.awayTeam.name}. ` +
-    `Son skor: ${scoreText()}. Türkçe kısa maç sonu raporu yaz; skoru değiştirme.`,
-    `🏁 **MAÇ SONU**\n${scoreText()}\nKarşılaşma sona erdi!`
+    `Maç sona erdi. Ev sahibi ${game.homeTeam.name}, deplasman ` +
+    `${game.awayTeam.name}. Son skor: ${game.homeScore}-${game.awayScore}. ` +
+    `Türkçe kısa maç sonu raporu yaz. Skoru değiştirme.`,
+    fallback
   );
 
-  await sendDiscord(`🏁 **MAÇ SONU RAPORU**\n${report}\n📊 **${scoreText()}**`);
+  await sendDiscord(
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | MAÇ SONU\n\n${scoreText(game)}\n\n` +
+    `> ${report}\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
+  );
 }
 
+// Sağlık kontrolü
 app.get("/health", (req, res) => {
   res.json({ online: true, project: "Serie A+" });
 });
 
+// Bir maçın durumunu veya tüm maçları gösterir.
 app.get("/status", (req, res) => {
-  if (!match) return res.json({ running: false, message: "Aktif maç yok." });
+  const id = req.query.matchId;
+
+  if (id) {
+    const game = getMatch(id);
+
+    if (!game) {
+      return res.status(404).json({ error: "Maç bulunamadı." });
+    }
+
+    return res.json({
+      matchId: game.id,
+      running: game.running,
+      waitingForLineups: game.running && !game.started,
+      finished: game.finished,
+      minute: game.minute,
+      score: {
+        home: game.homeScore,
+        away: game.awayScore
+      },
+      home: game.homeTeam.name,
+      away: game.awayTeam.name
+    });
+  }
 
   res.json({
-    running: match.running,
-    waitingForLineups: !match.started,
-    minute: match.minute,
-    score: {
-      home: match.homeScore,
-      away: match.awayScore
-    },
-    home: match.homeTeam.name,
-    away: match.awayTeam.name
+    activeMatches: [...matches.values()]
+      .filter((game) => game.running)
+      .map((game) => ({
+        matchId: game.id,
+        home: game.homeTeam.name,
+        away: game.awayTeam.name,
+        running: game.running,
+        waitingForLineups: !game.started,
+        minute: game.minute,
+        score: `${game.homeScore}-${game.awayScore}`
+      }))
   });
 });
 
+// Yeni maç oluşturur; diğer maçları durdurmaz.
 app.post("/start", authorized, async (req, res) => {
   const { home, away, homeEmoji, awayEmoji } = req.body || {};
 
@@ -273,11 +390,10 @@ app.post("/start", authorized, async (req, res) => {
     });
   }
 
-  if (match?.running) {
-    return res.status(409).json({ error: "Zaten devam eden bir maç var." });
-  }
+  const id = crypto.randomBytes(3).toString("hex").toUpperCase();
 
-  match = {
+  const game = {
+    id,
     running: true,
     started: false,
     finished: false,
@@ -296,36 +412,47 @@ app.post("/start", authorized, async (req, res) => {
     }
   };
 
+  matches.set(id, game);
+
   await sendDiscord(
-    `📝 **MAÇ OLUŞTURULDU**\n${scoreText()}\n` +
-    `Maçı başlatmak için önce /kadrogir ile iki takımın 11 oyuncusunu girin.`
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | MAÇ OLUŞTURULDU\n\n${scoreText(game)}\n\n` +
+    `> 📋 Kadroları girmek için maç ID'si: \`${id}\`\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
   );
 
   res.json({
     started: true,
     waitingForLineups: true,
-    home: home.trim(),
-    away: away.trim(),
+    matchId: id,
+    home: game.homeTeam.name,
+    away: game.awayTeam.name,
     message: "Maç oluşturuldu; kadrolar bekleniyor."
   });
 });
 
+// Maça 11 oyunculuk kadro kaydeder.
 app.post("/lineup", authorized, async (req, res) => {
-  if (!match?.running || match.started) {
+  const { matchId, side, players } = req.body || {};
+  const game = getMatch(matchId);
+
+  if (!game || !game.running || game.started) {
     return res.status(400).json({
-      error: "Önce maç oluşturulmalı; maç başladıysa kadro değiştirilemez."
+      error: "Maç bulunamadı, durduruldu veya kadrolar zaten tamamlandı."
     });
   }
 
-  const { side, players } = req.body || {};
-  const team = teamFor(side);
+  const team = teamFor(game, side);
 
   if (!team) {
     return res.status(400).json({ error: "taraf ev veya dep olmalıdır." });
   }
 
-  if (!Array.isArray(players) || players.length !== 11 ||
-      players.some((name) => typeof name !== "string" || !name.trim())) {
+  if (
+    !Array.isArray(players) ||
+    players.length !== 11 ||
+    players.some((name) => typeof name !== "string" || !name.trim())
+  ) {
     return res.status(400).json({
       error: "Tam olarak 11 oyuncu adı girilmelidir."
     });
@@ -339,20 +466,185 @@ app.post("/lineup", authorized, async (req, res) => {
   }));
 
   await sendDiscord(
-    `📋 **KADRO KAYDEDİLDİ**\n${team.emoji} ${team.name}\n` +
-    team.players.map((p, i) => `${i + 1}. ${p.name}`).join("\n")
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | KADRO KAYDEDİLDİ\n\n` +
+    `${team.emoji} **${team.name}**\n` +
+    team.players.map((p, i) => `${i + 1}. ${p.name}`).join("\n") +
+    `\n-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
   );
 
-  if (match.homeTeam.players.length === 11 &&
-      match.awayTeam.players.length === 11) {
-    match.started = true;
-    runMatch(match).catch((error) =>
-      console.error("Maç akışı hatası:", error)
+  if (
+    game.homeTeam.players.length === 11 &&
+    game.awayTeam.players.length === 11
+  ) {
+    game.started = true;
+
+    runMatch(game).catch((error) =>
+      console.error(`Maç ${game.id} hatası:`, error)
     );
+
     return res.json({
       saved: true,
       matchStarted: true,
-      message: "İki kadro tamamlandı; maç anlatımı başladı."
+      matchId: game.id,
+      message: "İki kadro tamamlandı; maç başladı."
+    });
+  }
+
+  res.json({
+    saved: true,
+    matchStarted: false,
+    matchId: game.id,
+    message: "Kadro kaydedildi. Diğer takımın kadrosu bekleniyor."
+  });
+});
+
+// Oyuncu değişikliği
+app.post("/substitution", authorized, async (req, res) => {
+  const { matchId, side, outPlayer, inPlayer } = req.body || {};
+  const game = getMatch(matchId);
+
+  if (!game || !game.running || !game.started) {
+    return res.status(400).json({ error: "Aktif maç bulunamadı." });
+  }
+
+  const team = teamFor(game, side);
+
+  if (!team || !outPlayer?.trim() || !inPlayer?.trim()) {
+    return res.status(400).json({
+      error: "matchId, taraf, cikan ve giren alanları zorunludur."
+    });
+  }
+
+  const outgoing = team.players.find(
+    (p) => p.active &&
+      p.name.toLowerCase() === outPlayer.trim().toLowerCase()
+  );
+
+  const incoming = team.players.find(
+    (p) => !p.active && !p.red &&
+      p.name.toLowerCase() === inPlayer.trim().toLowerCase()
+  );
+
+  if (!outgoing) {
+    return res.status(400).json({
+      error: "Çıkan oyuncu sahada değil."
+    });
+  }
+
+  if (!incoming) {
+    return res.status(400).json({
+      error: "Giren oyuncu kadroda bulunmalı ve yedek olmalıdır."
+    });
+  }
+
+  outgoing.active = false;
+  incoming.active = true;
+
+  await sendDiscord(
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | ${game.minute}'\n\n${scoreText(game)}\n\n` +
+    `> ${team.emoji} <:futbolcu:1504904247551201441> ` +
+    `**${game.minute}'** | 🔄 **${outgoing.name}** çıktı, ` +
+    `**${incoming.name}** oyuna girdi.\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
+  );
+
+  res.json({ success: true, matchId: game.id });
+});
+
+// Elle kart verme
+app.post("/card", authorized, async (req, res) => {
+  const { matchId, side, player: playerName, type } = req.body || {};
+  const game = getMatch(matchId);
+
+  if (!game || !game.running || !game.started) {
+    return res.status(400).json({ error: "Aktif maç bulunamadı." });
+  }
+
+  const team = teamFor(game, side);
+
+  if (
+    !team ||
+    !playerName?.trim() ||
+    !["sari", "kirmizi"].includes(type)
+  ) {
+    return res.status(400).json({
+      error: "matchId, taraf, oyuncu ve tur (sari/kirmizi) gereklidir."
+    });
+  }
+
+  const player = team.players.find(
+    (p) => p.active &&
+      p.name.toLowerCase() === playerName.trim().toLowerCase()
+  );
+
+  if (!player) {
+    return res.status(400).json({
+      error: "Oyuncu bu takımda sahada bulunamadı."
+    });
+  }
+
+  let message;
+
+  if (type === "kirmizi" || player.yellow >= 1) {
+    player.red = true;
+    player.active = false;
+    message = `🟥 **${player.name}** kırmızı kart gördü ve oyun dışı kaldı!`;
+  } else {
+    player.yellow++;
+    message = `🟨 **${player.name}** sarı kart gördü.`;
+  }
+
+  await sendDiscord(
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | ${game.minute}'\n\n${scoreText(game)}\n\n` +
+    `> ${team.emoji} <:futbolcu:1504904247551201441> ` +
+    `**${game.minute}'** | ${message}\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
+  );
+
+  res.json({ success: true, matchId: game.id });
+});
+
+// Yalnızca belirtilen maçı durdurur.
+app.post("/stop", authorized, async (req, res) => {
+  const game = getMatch(req.body?.matchId);
+
+  if (!game || !game.running) {
+    return res.status(404).json({
+      stopped: false,
+      error: "Bu ID ile devam eden maç bulunamadı."
+    });
+  }
+
+  game.running = false;
+
+  await sendDiscord(
+    `${matchTag(game)}\n` +
+    `### 📢 BİLGİ | MAÇ DURDURULDU\n\n${scoreText(game)}\n\n` +
+    `-# <:spiker:1552793209803898950> Serie A+ Canlı Anlatım`
+  );
+
+  res.json({ stopped: true, matchId: game.id });
+});
+
+app.use((err, req, res, next) => {
+  console.error("İstek hatası:", err.message);
+
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({
+      error: "İstek gövdesi geçersiz.",
+      type: err.type
+    });
+  }
+
+  res.status(500).json({ error: "Sunucu hatası." });
+});
+
+app.listen(PORT, () => {
+  console.log(`Serie A+ botu ${PORT} portunda çalışıyor.`);
+});  message: "İki kadro tamamlandı; maç anlatımı başladı."
     });
   }
 

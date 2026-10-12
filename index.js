@@ -275,8 +275,9 @@ async function automaticEvent(game) {
     return;
   }
 
-  const defender = activePlayers(opponent)[
-    Math.floor(Math.random() * activePlayers(opponent).length)
+  const defenders = activePlayers(opponent);
+  const defender = defenders[
+    Math.floor(Math.random() * defenders.length)
   ];
 
   if (defender) {
@@ -524,13 +525,26 @@ app.post("/lineup", authorize, async (req, res) => {
     });
   }
 
+  /* Yedekleri metinden veya diziden al */
+
+  let substituteList = [];
+
+  if (typeof substitutes === "string") {
+    substituteList = substitutes
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+  } else if (Array.isArray(substitutes)) {
+    substituteList = substitutes;
+  } else if (substitutes !== undefined && substitutes !== null) {
+    return res.status(400).json({
+      error: "Yedek oyuncular geçersiz."
+    });
+  }
+
   if (
-    substitutes !== undefined &&
-    (
-      !Array.isArray(substitutes) ||
-      substitutes.some(
-        (name) => typeof name !== "string" || !name.trim()
-      )
+    substituteList.some(
+      (name) => typeof name !== "string" || !name.trim()
     )
   ) {
     return res.status(400).json({
@@ -540,7 +554,7 @@ app.post("/lineup", authorize, async (req, res) => {
 
   const allNames = [
     ...players,
-    ...(substitutes || [])
+    ...substituteList
   ].map((name) => name.trim().toLocaleLowerCase("tr"));
 
   if (new Set(allNames).size !== allNames.length) {
@@ -557,7 +571,7 @@ app.post("/lineup", authorize, async (req, res) => {
   }));
 
   team.players.push(
-    ...(substitutes || []).map((name) => ({
+    ...substituteList.map((name) => ({
       name: name.trim(),
       active: false,
       yellow: 0,
@@ -578,13 +592,11 @@ app.post("/lineup", authorize, async (req, res) => {
       .join("\n")
   );
 
-  const homeReady = game.homeTeam.players.filter(
-    (player) => player.active
-  ).length === 11;
+  const homeReady =
+    game.homeTeam.players.filter((player) => player.active).length === 11;
 
-  const awayReady = game.awayTeam.players.filter(
-    (player) => player.active
-  ).length === 11;
+  const awayReady =
+    game.awayTeam.players.filter((player) => player.active).length === 11;
 
   if (homeReady && awayReady) {
     game.started = true;

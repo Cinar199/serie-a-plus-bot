@@ -3,6 +3,7 @@ const crypto = require("crypto");
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
 const PORT = process.env.PORT || 3000;
 const CONTROL_SECRET = process.env.CONTROL_SECRET;

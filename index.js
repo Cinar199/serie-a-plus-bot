@@ -1,7 +1,9 @@
+
 const express = require("express");
 const crypto = require("crypto");
 
 const app = express();
+
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
@@ -13,6 +15,8 @@ const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || "openrouter/auto";
 
 const matches = new Map();
+
+/* YETKİ KONTROLÜ */
 
 function authorize(req, res, next) {
   const authorization = req.get("Authorization") || "";
@@ -30,21 +34,21 @@ function authorize(req, res, next) {
   next();
 }
 
+/* MAÇ VE TAKIM YARDIMCILARI */
+
 function getMatch(id) {
   if (typeof id !== "string") return null;
   return matches.get(id.trim().toUpperCase()) || null;
 }
 
 function getTeam(game, side) {
-  if (["ev", "home"].includes(String(side).toLowerCase())) {
+  const value = String(side || "").toLowerCase();
+
+  if (["ev", "home"].includes(value)) {
     return game.homeTeam;
   }
 
-  if (
-    ["dep", "deplasman", "away"].includes(
-      String(side).toLowerCase()
-    )
-  ) {
+  if (["dep", "deplasman", "away"].includes(value)) {
     return game.awayTeam;
   }
 
@@ -66,6 +70,8 @@ function matchHeader(game) {
 function isRunning(game) {
   return matches.get(game.id) === game && game.running;
 }
+
+/* DISCORD MESAJI */
 
 async function sendDiscord(channelId, content) {
   if (!DISCORD_BOT_TOKEN) {
@@ -116,6 +122,8 @@ async function sendGameDiscord(game, content) {
     `${matchHeader(game)}\n${content}`
   );
 }
+
+/* YAPAY ZEKÂLI SPİKER */
 
 async function aiCommentary(prompt, fallback) {
   if (!OPENROUTER_API_KEY) return fallback;
@@ -173,7 +181,7 @@ async function aiCommentary(prompt, fallback) {
 }
 
 function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function announce(game, content) {
@@ -189,8 +197,10 @@ async function announce(game, content) {
 }
 
 function activePlayers(team) {
-  return team.players.filter((player) => player.active);
+  return team.players.filter(player => player.active);
 }
+
+/* OTOMATİK MAÇ OLAYLARI */
 
 async function automaticEvent(game) {
   const home = game.homeTeam;
@@ -205,6 +215,7 @@ async function automaticEvent(game) {
   const team = attackingHome ? home : away;
   const opponent = attackingHome ? away : home;
   const players = attackingHome ? homePlayers : awayPlayers;
+
   const player = players[
     Math.floor(Math.random() * players.length)
   ];
@@ -263,8 +274,7 @@ async function automaticEvent(game) {
 
       await announce(
         game,
-        `> 🟥 **${player.name}** ikinci sarı karttan ` +
-        "kırmızı kart gördü!"
+        `> 🟥 **${player.name}** ikinci sarı karttan kırmızı kart gördü!`
       );
     } else {
       await announce(
@@ -277,17 +287,20 @@ async function automaticEvent(game) {
   }
 
   const defenders = activePlayers(opponent);
+
+  if (!defenders.length) return;
+
   const defender = defenders[
     Math.floor(Math.random() * defenders.length)
   ];
 
-  if (defender) {
-    await announce(
-      game,
-      `> 🛡️ **${defender.name}** rakip atağını engelledi.`
-    );
-  }
+  await announce(
+    game,
+    `> 🛡️ **${defender.name}** rakip atağını engelledi.`
+  );
 }
+
+/* MAÇI ÇALIŞTIR */
 
 async function runMatch(game) {
   if (!isRunning(game)) return;
@@ -356,6 +369,41 @@ async function runMatch(game) {
   );
 }
 
+/* OYUNCU LİSTESİNİ OKU */
+
+function parsePlayers(value) {
+  if (Array.isArray(value)) {
+    return value.map(name => String(name).trim());
+  }
+
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  const text = value.trim();
+
+  if (!text) return [];
+
+  // JSON dizisi metin olarak gelirse destekle.
+  if (text.startsWith("[") && text.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(text);
+
+      if (Array.isArray(parsed)) {
+        return parsed.map(name => String(name).trim());
+      }
+    } catch (_) {
+      // Dizi JSON değilse aşağıdaki ayraçlar denenir.
+    }
+  }
+
+  // BDFD'den gelen |, satır sonu veya ; ayraçlarını destekle.
+  return text
+    .split(/[|\n\r;]+/)
+    .map(name => name.trim())
+    .filter(Boolean);
+}
+
 /* ANA SAYFA */
 
 app.get("/", (req, res) => {
@@ -386,11 +434,13 @@ app.get("/status", (req, res) => {
 
     if (!game) {
       return res.status(404).json({
+        success: false,
         error: "Maç bulunamadı."
       });
     }
 
     return res.json({
+      success: true,
       matchId: game.id,
       running: game.running,
       started: game.started,
@@ -407,9 +457,10 @@ app.get("/status", (req, res) => {
   }
 
   return res.json({
+    success: true,
     activeMatches: [...matches.values()]
-      .filter((game) => game.running)
-      .map((game) => ({
+      .filter(game => game.running)
+      .map(game => ({
         matchId: game.id,
         home: game.homeTeam.name,
         away: game.awayTeam.name,
@@ -434,17 +485,18 @@ app.post("/start", authorize, async (req, res) => {
 
   if (
     ![home, away, homeEmoji, awayEmoji].every(
-      (value) =>
-        typeof value === "string" && value.trim().length > 0
+      value => typeof value === "string" && value.trim()
     )
   ) {
     return res.status(400).json({
+      success: false,
       error: "home, away, homeEmoji ve awayEmoji zorunludur."
     });
   }
 
   if (!/^\d{17,20}$/.test(String(channelId || ""))) {
     return res.status(400).json({
+      success: false,
       error: "Geçerli bir Discord kanal ID'si girilmelidir."
     });
   }
@@ -498,10 +550,12 @@ app.post("/start", authorize, async (req, res) => {
 
 app.post("/lineup", authorize, async (req, res) => {
   const { matchId, side, players, substitutes } = req.body || {};
+
   const game = getMatch(matchId);
 
   if (!game || !game.running || game.started) {
     return res.status(400).json({
+      success: false,
       error: "Aktif ve kadro bekleyen maç bulunamadı."
     });
   }
@@ -510,61 +564,60 @@ app.post("/lineup", authorize, async (req, res) => {
 
   if (!team) {
     return res.status(400).json({
+      success: false,
       error: "Taraf ev veya dep olmalıdır."
     });
   }
 
+  const playerList = parsePlayers(players);
+
   if (
-    !Array.isArray(players) ||
-    players.length !== 11 ||
-    players.some(
-      (name) => typeof name !== "string" || !name.trim()
-    )
+    playerList.length !== 11 ||
+    playerList.some(name => typeof name !== "string" || !name.trim())
   ) {
+    console.error("Kadro oyuncu sayısı hatalı:", {
+      matchId,
+      side,
+      receivedType: typeof players,
+      receivedCount: playerList.length,
+      receivedPlayers: playerList
+    });
+
     return res.status(400).json({
-      error: "Tam olarak 11 oyuncu adı girilmelidir."
+      success: false,
+      error: "Tam olarak 11 oyuncu adı girilmelidir.",
+      receivedCount: playerList.length,
+      hint: "Oyuncuları | karakteriyle ayırarak gönder."
     });
   }
-
-  /* Yedekleri metinden veya diziden al */
 
   let substituteList = [];
 
   if (typeof substitutes === "string") {
     substituteList = substitutes
       .split(",")
-      .map((name) => name.trim())
+      .map(name => name.trim())
       .filter(Boolean);
   } else if (Array.isArray(substitutes)) {
-    substituteList = substitutes;
+    substituteList = substitutes.map(name => String(name).trim());
   } else if (substitutes !== undefined && substitutes !== null) {
     return res.status(400).json({
+      success: false,
       error: "Yedek oyuncular geçersiz."
     });
   }
 
-  if (
-    substituteList.some(
-      (name) => typeof name !== "string" || !name.trim()
-    )
-  ) {
-    return res.status(400).json({
-      error: "Yedek oyuncular geçersiz."
-    });
-  }
-
-  const allNames = [
-    ...players,
-    ...substituteList
-  ].map((name) => name.trim().toLocaleLowerCase("tr"));
+  const allNames = [...playerList, ...substituteList]
+    .map(name => name.trim().toLocaleLowerCase("tr"));
 
   if (new Set(allNames).size !== allNames.length) {
     return res.status(400).json({
+      success: false,
       error: "Kadrodaki oyuncu isimleri benzersiz olmalıdır."
     });
   }
 
-  team.players = players.map((name) => ({
+  team.players = playerList.map(name => ({
     name: name.trim(),
     active: true,
     yellow: 0,
@@ -572,7 +625,7 @@ app.post("/lineup", authorize, async (req, res) => {
   }));
 
   team.players.push(
-    ...substituteList.map((name) => ({
+    ...substituteList.map(name => ({
       name: name.trim(),
       active: false,
       yellow: 0,
@@ -580,36 +633,39 @@ app.post("/lineup", authorize, async (req, res) => {
     }))
   );
 
-  await sendGameDiscord(
+  const messageSent = await sendGameDiscord(
     game,
     `### 📢 BİLGİ | KADRO KAYDEDİLDİ\n\n` +
     `${team.emoji} **${team.name}**\n` +
     team.players
-      .map(
-        (player, index) =>
-          `${index + 1}. ${player.name}` +
-          `${player.active ? "" : " (Yedek)"}`
+      .map((player, index) =>
+        `${index + 1}. ${player.name}` +
+        `${player.active ? "" : " (Yedek)"}`
       )
       .join("\n")
   );
 
   const homeReady =
-    game.homeTeam.players.filter((player) => player.active).length === 11;
+    game.homeTeam.players.filter(player => player.active).length === 11;
 
   const awayReady =
-    game.awayTeam.players.filter((player) => player.active).length === 11;
+    game.awayTeam.players.filter(player => player.active).length === 11;
 
   if (homeReady && awayReady) {
     game.started = true;
 
-    runMatch(game).catch((error) => {
+    runMatch(game).catch(error => {
       console.error(`Maç ${game.id} hatası:`, error);
     });
 
     return res.json({
       success: true,
       matchStarted: true,
-      matchId: game.id
+      matchId: game.id,
+      team: team.name,
+      playerCount: playerList.length,
+      substituteCount: substituteList.length,
+      messageSent
     });
   }
 
@@ -617,24 +673,23 @@ app.post("/lineup", authorize, async (req, res) => {
     success: true,
     matchStarted: false,
     matchId: game.id,
-    message: "Diğer takımın kadrosu bekleniyor."
+    team: team.name,
+    playerCount: playerList.length,
+    substituteCount: substituteList.length,
+    messageSent,
+    message: "Kadro kaydedildi. Diğer takımın kadrosu bekleniyor."
   });
 });
 
 /* OYUNCU DEĞİŞİKLİĞİ */
 
 app.post("/substitution", authorize, async (req, res) => {
-  const {
-    matchId,
-    side,
-    outPlayer,
-    inPlayer
-  } = req.body || {};
-
+  const { matchId, side, outPlayer, inPlayer } = req.body || {};
   const game = getMatch(matchId);
 
   if (!game || !game.running || !game.started) {
     return res.status(400).json({
+      success: false,
       error: "Aktif maç bulunamadı."
     });
   }
@@ -647,25 +702,29 @@ app.post("/substitution", authorize, async (req, res) => {
     typeof inPlayer !== "string"
   ) {
     return res.status(400).json({
+      success: false,
       error: "Taraf ve oyuncu isimleri zorunludur."
     });
   }
 
   const outgoing = team.players.find(
-    (player) =>
+    player =>
       player.active &&
-      player.name.toLowerCase() === outPlayer.trim().toLowerCase()
+      player.name.toLocaleLowerCase("tr") ===
+      outPlayer.trim().toLocaleLowerCase("tr")
   );
 
   const incoming = team.players.find(
-    (player) =>
+    player =>
       !player.active &&
       !player.red &&
-      player.name.toLowerCase() === inPlayer.trim().toLowerCase()
+      player.name.toLocaleLowerCase("tr") ===
+      inPlayer.trim().toLocaleLowerCase("tr")
   );
 
   if (!outgoing || !incoming) {
     return res.status(400).json({
+      success: false,
       error: "Çıkan oyuncu sahada, giren oyuncu yedek olmalıdır."
     });
   }
@@ -675,8 +734,7 @@ app.post("/substitution", authorize, async (req, res) => {
 
   await announce(
     game,
-    `> 🔄 **${outgoing.name}** çıktı, ` +
-    `**${incoming.name}** oyuna girdi.`
+    `> 🔄 **${outgoing.name}** çıktı, **${incoming.name}** oyuna girdi.`
   );
 
   return res.json({
@@ -688,17 +746,12 @@ app.post("/substitution", authorize, async (req, res) => {
 /* KART */
 
 app.post("/card", authorize, async (req, res) => {
-  const {
-    matchId,
-    side,
-    player: playerName,
-    type
-  } = req.body || {};
-
+  const { matchId, side, player: playerName, type } = req.body || {};
   const game = getMatch(matchId);
 
   if (!game || !game.running || !game.started) {
     return res.status(400).json({
+      success: false,
       error: "Aktif maç bulunamadı."
     });
   }
@@ -711,18 +764,21 @@ app.post("/card", authorize, async (req, res) => {
     !["sari", "kirmizi"].includes(type)
   ) {
     return res.status(400).json({
+      success: false,
       error: "Taraf, oyuncu ve kart türü zorunludur."
     });
   }
 
   const player = team.players.find(
-    (item) =>
+    item =>
       item.active &&
-      item.name.toLowerCase() === playerName.trim().toLowerCase()
+      item.name.toLocaleLowerCase("tr") ===
+      playerName.trim().toLocaleLowerCase("tr")
   );
 
   if (!player) {
     return res.status(400).json({
+      success: false,
       error: "Oyuncu sahada bulunamadı."
     });
   }
@@ -754,6 +810,7 @@ app.post("/stop", authorize, async (req, res) => {
 
   if (!game || !game.running) {
     return res.status(404).json({
+      success: false,
       stopped: false,
       error: "Bu ID ile devam eden maç bulunamadı."
     });
@@ -769,18 +826,20 @@ app.post("/stop", authorize, async (req, res) => {
   );
 
   return res.json({
+    success: true,
     stopped: true,
     matchId: game.id
   });
 });
 
-/* HATA YÖNETİMİ */
+/* JSON VE SUNUCU HATALARI */
 
 app.use((err, req, res, next) => {
   console.error("İstek hatası:", err.message);
 
   if (err.type === "entity.parse.failed") {
     return res.status(400).json({
+      success: false,
       error: "Geçersiz JSON gövdesi."
     });
   }
@@ -790,6 +849,7 @@ app.use((err, req, res, next) => {
   }
 
   return res.status(500).json({
+    success: false,
     error: "Sunucu tarafında beklenmeyen hata."
   });
 });

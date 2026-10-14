@@ -914,7 +914,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-
 /* VERİTABANINI HAZIRLA VE SUNUCUYU BAŞLAT */
 
 initializeDatabase()

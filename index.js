@@ -16,6 +16,27 @@ const OPENROUTER_MODEL =
 
 const matches = new Map();
 
+const TEAMS = [
+  "SSC Vincia",
+  "AC Milan",
+  "Internazionale Milan",
+  "Juventus FC",
+  "Vincia FC",
+  "ACF Fiorentina",
+  "AS Roma",
+  "SS Lazio",
+  "Genoa CFC",
+  "Hajduk Split",
+  "BSC Young Boys",
+  "FC Basel",
+  "US Torino",
+  "Como 1907",
+  "SS Carthage",
+  "RB Salzburg",
+  "SK Sturm Graz",
+  "AS Monaco"
+];
+
 /* YETKİ KONTROLÜ */
 
 function authorize(req, res, next) {
@@ -421,6 +442,17 @@ app.get("/health", (req, res) => {
     online: true,
     project: "Serie A+",
     multiMatch: true
+  });
+});
+
+
+/* SERIE A+ TAKIM LİSTESİ */
+
+app.get("/teams", (req, res) => {
+  res.json({
+    success: true,
+    count: TEAMS.length,
+    teams: TEAMS
   });
 });
 

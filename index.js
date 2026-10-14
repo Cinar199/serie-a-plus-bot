@@ -1,6 +1,20 @@
 const express = require("express");
 const crypto = require("crypto");
 
+const express = require("express");
+const crypto = require("crypto");
+const { Pool } = require("pg");
+
+const app = express();
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false, limit: "100kb" }));
+
 const app = express();
 
 app.use(express.json({ limit: "100kb" }));
@@ -35,6 +49,21 @@ const TEAMS = [
   "SK Sturm Graz",
   "AS Monaco"
 ];
+
+async function initializeDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS players (
+      id BIGSERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      overall INTEGER NOT NULL CHECK (overall BETWEEN 1 AND 100),
+      age INTEGER NOT NULL CHECK (age BETWEEN 1 AND 100),
+      team VARCHAR(100),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  console.log("PostgreSQL oyuncu tablosu hazır.");
+}
 
 /* YETKİ KONTROLÜ */
 
@@ -885,8 +914,16 @@ app.use((err, req, res, next) => {
   });
 });
 
-/* SUNUCUYU BAŞLAT */
 
-app.listen(PORT, () => {
-  console.log(`Serie A+ botu ${PORT} portunda çalışıyor.`);
-});
+/* VERİTABANINI HAZIRLA VE SUNUCUYU BAŞLAT */
+
+initializeDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Serie A+ botu ${PORT} portunda çalışıyor.`);
+    });
+  })
+  .catch(error => {
+    console.error("Veritabanı başlatılamadı:", error.message);
+    process.exit(1);
+  });
